@@ -209,44 +209,65 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       setError(null);
 
       try {
-        // Handle OAuth callback if present (only once)
-        if (sdk.isInOAuthCallback() && !oauthCompleted) {
+        // IMPORTANT: Only initialize SDK if we're returning from OAuth callback
+        // This prevents automatic OAuth redirect on normal page loads
+        const isOAuthCallback = sdk.isInOAuthCallback();
+        
+        if (isOAuthCallback && !oauthCompleted) {
           console.log('OAuth callback detected, completing OAuth...');
           oauthCompleted = true;
+          
+          // Initialize SDK to handle the OAuth callback
+          await sdk.initialize();
+          console.log('SDK initialized from OAuth callback');
           await sdk.completeOAuth();
           console.log('OAuth completed successfully');
-        }
-
-        // Initialize the SDK
-        await sdk.initialize();
-        console.log('SDK initialized, checking authentication...');
-        console.log('sdk.isAuthenticated() result:', sdk.isAuthenticated());
-
-        // Check authentication status - BUT ONLY IF WE JUST COMPLETED OAUTH
-        // This prevents auto-login from stale tokens on page refresh
-        if (sdk.isAuthenticated() && oauthCompleted) {
-          console.log('SDK authenticated after OAuth callback, fetching lender role...');
-          if (mounted) {
+          
+          // After OAuth completes, fetch the lender role
+          if (sdk.isAuthenticated() && mounted) {
+            console.log('SDK authenticated after OAuth, fetching lender role...');
             await fetchLenderRole(sdk);
           }
-        } else if (!oauthCompleted) {
-          // On normal page load (not OAuth callback), don't auto-authenticate
-          console.log('Normal page load detected, skipping auto-authentication');
-          if (mounted) {
-            resetAuthState();
-          }
         } else {
-          if (mounted) {
-            console.log('SDK not authenticated');
-            resetAuthState();
+          // On normal page load (NOT OAuth callback), do NOT initialize SDK
+          // This prevents the automatic OAuth redirect
+          console.log('Normal page load detected - NOT initializing SDK (prevents auto-OAuth redirect)');
+          
+          // Instead, check if there's already a valid token in sessionStorage
+          const tokenKey = `uipath_sdk_user_token-${config.clientId}`;
+          const existingToken = sessionStorage.getItem(tokenKey);
+          
+          if (existingToken) {
+            try {
+              const decoded = jwtDecode<any>(existingToken);
+              // Check if token is not expired
+              if (decoded.exp && decoded.exp > Math.floor(Date.now() / 1000)) {
+                console.log('Valid existing token found, authenticating...');
+                if (mounted) {
+                  await fetchLenderRole(sdk);
+                }
+              } else {
+                console.log('Existing token is expired');
+                if (mounted) {
+                  resetAuthState();
+                }
+              }
+            } catch (tokenErr) {
+              console.log('Existing token is invalid:', tokenErr);
+              if (mounted) {
+                resetAuthState();
+              }
+            }
+          } else {
+            console.log('No existing token found, user is not authenticated');
+            if (mounted) {
+              resetAuthState();
+            }
           }
         }
       } catch (err) {
-        // Only log error if it's not the typical OAuth double-invocation issue
         const errorMsg = getAuthErrorMessage(err, 'Authentication failed');
-        if (!errorMsg.includes('invalid_grant') || !oauthCompleted) {
-          console.error('Authentication initialization failed:', err);
-        }
+        console.error('Authentication initialization failed:', err);
         if (mounted) {
           resetAuthState();
           setError(getAuthErrorMessage(err, 'Authentication failed'));
