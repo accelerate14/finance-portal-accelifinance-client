@@ -157,7 +157,10 @@ export default function Home() {
   } = useUiPathAuth();
 
   const isAnyLoading = isBorrowerLoading || isLenderLoading;
-  const isAnyAuthenticated = isBorrowerAuth || isLenderAuth;
+  // Lender authentication is only valid if both isLenderAuth AND roleLender are present
+  // This prevents stale/incomplete authentication from triggering the lender dashboard
+  const isValidLenderAuth = isLenderAuth && roleLender;
+  const isAnyAuthenticated = isBorrowerAuth || isValidLenderAuth;
   const [scrolled, setScrolled] = useState(false);
   
   // Borrower dashboard data
@@ -232,7 +235,8 @@ export default function Home() {
 
   // Fetch lender stats when authenticated
   const fetchLenderStats = useCallback(async () => {
-    if (!isLenderAuth || !sdk) return;
+    // Only fetch if lender is authenticated AND has a valid role
+    if (!isLenderAuth || !roleLender || !sdk) return;
     
     setLenderDataLoading(true);
     try {
@@ -304,7 +308,7 @@ export default function Home() {
     } finally {
       setLenderDataLoading(false);
     }
-  }, [isLenderAuth, sdk]);
+  }, [isLenderAuth, roleLender, sdk]);
 
   // Fetch stats when authentication state changes
   useEffect(() => {
@@ -314,10 +318,10 @@ export default function Home() {
   }, [isBorrowerAuth, fetchBorrowerStats]);
 
   useEffect(() => {
-    if (isLenderAuth) {
+    if (isValidLenderAuth) {
       fetchLenderStats();
     }
-  }, [isLenderAuth, fetchLenderStats]);
+  }, [isValidLenderAuth, fetchLenderStats]);
 
   const getLenderDashboardPath = () => {
     if (roleLender === "Underwriter") return "/underwriter/dashboard";
@@ -416,7 +420,7 @@ export default function Home() {
     }
 
     // Lender Dashboard (Officer or Underwriter)
-    if (isLenderAuth) {
+    if (isValidLenderAuth) {
       const isUnderwriter = roleLender === "Underwriter";
       const dashboardPath = getLenderDashboardPath();
       
