@@ -242,9 +242,20 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
               const decoded = jwtDecode<any>(existingToken);
               // Check if token is not expired
               if (decoded.exp && decoded.exp > Math.floor(Date.now() / 1000)) {
-                console.log('Valid existing token found, authenticating...');
+                console.log('Valid existing token found, initializing SDK and authenticating...');
                 if (mounted) {
-                  await fetchLenderRole(sdk);
+                  try {
+                    // Initialize SDK with existing token
+                    await sdk.initialize();
+                    if (sdk.isAuthenticated()) {
+                      await fetchLenderRole(sdk);
+                    } else {
+                      resetAuthState();
+                    }
+                  } catch (initErr) {
+                    console.error('Failed to initialize SDK with existing token:', initErr);
+                    resetAuthState();
+                  }
                 }
               } else {
                 console.log('Existing token is expired');
@@ -300,8 +311,11 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         sessionStorage.setItem('intended_role', role);
       }
 
+      console.log('Login button clicked, initializing SDK to trigger OAuth...');
+      
       // Initialize the SDK which will trigger OAuth if not authenticated
       await sdk.initialize();
+      console.log('SDK initialized, OAuth redirect should be happening...');
       
       // After initialize, the SDK will handle the OAuth redirect
       // When the callback returns, the useEffect will re-run and handle the callback
