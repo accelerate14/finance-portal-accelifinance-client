@@ -84,13 +84,33 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       console.log('SDK is authenticated, fetching token...');
       const lenderToken = sessionStorage.getItem(tokenKey);
       if (!lenderToken) {
-        console.log('No lender token found in session storage');
+        console.log('No lender token found in session storage - authentication invalid');
         resetAuthState();
         setError('Missing lender session token');
         return false;
       }
 
-      const decodedToken = jwtDecode<any>(lenderToken);
+      let decodedToken: any;
+      try {
+        decodedToken = jwtDecode<any>(lenderToken);
+      } catch (tokenErr) {
+        console.log('Token decode failed - token is invalid', tokenErr);
+        resetAuthState();
+        setError('Invalid lender session token');
+        return false;
+      }
+
+      // Check if token is expired
+      if (decodedToken.exp) {
+        const now = Math.floor(Date.now() / 1000);
+        if (decodedToken.exp < now) {
+          console.log('Token is expired');
+          resetAuthState();
+          setError('Lender session has expired');
+          return false;
+        }
+      }
+
       const userEmail = decodedToken?.email || decodedToken?.upn || decodedToken?.name;
       console.log('User email from token:', userEmail);
       setUser(userEmail || null);
@@ -202,10 +222,18 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         console.log('SDK initialized, checking authentication...');
         console.log('sdk.isAuthenticated() result:', sdk.isAuthenticated());
 
-        // Check authentication status
-        if (sdk.isAuthenticated()) {
+        // Check authentication status - BUT ONLY IF WE JUST COMPLETED OAUTH
+        // This prevents auto-login from stale tokens on page refresh
+        if (sdk.isAuthenticated() && oauthCompleted) {
+          console.log('SDK authenticated after OAuth callback, fetching lender role...');
           if (mounted) {
             await fetchLenderRole(sdk);
+          }
+        } else if (!oauthCompleted) {
+          // On normal page load (not OAuth callback), don't auto-authenticate
+          console.log('Normal page load detected, skipping auto-authentication');
+          if (mounted) {
+            resetAuthState();
           }
         } else {
           if (mounted) {
