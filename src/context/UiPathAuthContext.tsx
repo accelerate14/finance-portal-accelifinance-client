@@ -3,7 +3,6 @@ import { UiPath, UiPathError } from '@uipath/uipath-typescript/core';
 import type { UiPathSDKConfig } from '@uipath/uipath-typescript/core';
 import { jwtDecode } from 'jwt-decode';
 import { Entities } from '@uipath/uipath-typescript/entities';
-import { fireAuditLog } from '../services/auditService';
  
  interface UiPathAuthContextType {
    isAuthenticated: boolean;
@@ -17,7 +16,7 @@ import { fireAuditLog } from '../services/auditService';
    isAdmin: boolean;
    switchToAdmin: () => void;
    switchToLender: () => void;
-   refreshAdminStatus: () => Promise<{ role: string | null; isAdmin: boolean } | null>;
+   refreshAdminStatus: () => Promise<void>;
  }
  
 const UiPathAuthContext = createContext<UiPathAuthContextType | undefined>(undefined);
@@ -34,8 +33,9 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
   const [hasLoggedOut, setHasLoggedOut] = useState(() => {
     return sessionStorage.getItem('lender_has_logged_out') === 'true';
   });
-  const [shouldInitializeSDK, setShouldInitializeSDK] = useState(false);
   const sdkRef = useRef<UiPath | null>(null);
+  const sdkInitializedRef = useRef(false);
+  const oauthCallbackHandledRef = useRef(false);
   
   const getSdk = () => {
     if (!sdkRef.current) {
@@ -85,36 +85,16 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       console.log('SDK is authenticated, fetching token...');
       const lenderToken = sessionStorage.getItem(tokenKey);
       if (!lenderToken) {
-        console.log('No lender token found in session storage - authentication invalid');
+        console.log('No lender token found in session storage');
         resetAuthState();
         setError('Missing lender session token');
         return false;
       }
 
-      let decodedToken: any;
-      try {
-        decodedToken = jwtDecode<any>(lenderToken);
-      } catch (tokenErr) {
-        console.log('Token decode failed - token is invalid', tokenErr);
-        resetAuthState();
-        setError('Invalid lender session token');
-        return false;
-      }
-
-      // Check if token is expired
-      if (decodedToken.exp) {
-        const now = Math.floor(Date.now() / 1000);
-        if (decodedToken.exp < now) {
-          console.log('Token is expired');
-          resetAuthState();
-          setError('Lender session has expired');
-          return false;
-        }
-      }
-
-      const userEmail = decodedToken?.email || decodedToken?.upn || decodedToken?.name;
+      const decodedToken = jwtDecode<any>(lenderToken);
+      const userEmail = decodedToken?.email || decodedToken?.name;
       console.log('User email from token:', userEmail);
-      setUser(userEmail || null);
+      setUser(decodedToken?.name || null);
 
       if (!lenderProfileEntityId) {
         resetAuthState();
@@ -170,19 +150,6 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       console.log('User isAdmin:', userIsAdmin);
       
       setIsAuthenticated(true);
-
-      // Trigger audit log exactly once per login
-      if (sessionStorage.getItem('just_logged_in')) {
-        sessionStorage.removeItem('just_logged_in');
-        fireAuditLog(sdk, userEmail, resolvedRole, {
-          action: 'UserLogin',
-          entityType: 'User',
-          entityId: userEmail,
-          description: `User successfully logged into the ${resolvedRole} portal`,
-          severity: 'Low'
-        }).catch(console.error);
-      }
-
       return true;
     } catch (err) {
       console.error('Failed to fetch lender role:', err);
@@ -192,140 +159,95 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
     }
   };
 
-  // Initialize SDK and handle OAuth callback on mount
+  // Handle OAuth callback on mount - DO NOT auto-initialize SDK
   useEffect(() => {
-    // Skip initialization if user has explicitly logged out (and not trying to login again)
-    if (hasLoggedOut && !shouldInitializeSDK) {
+    // Skip if user has explicitly logged out
+    if (hasLoggedOut) {
       console.log('User has logged out, skipping re-authentication');
       setIsLoading(false);
       return;
     }
 
-    const sdk = getSdk();
     let mounted = true;
-    let oauthCompleted = false;
+    const sdk = getSdk();
 
-    const initializeAuth = async () => {
-      setIsLoading(true);
-      setError(null);
-
+    const handleAuthCallback = async () => {
       try {
-        // Check if we're in an OAuth callback OR if user clicked login button
-        const isOAuthCallback = sdk.isInOAuthCallback();
-        
-        if ((isOAuthCallback || shouldInitializeSDK) && !oauthCompleted) {
-          console.log('OAuth callback or login button detected, initializing SDK...');
-          oauthCompleted = true;
-          
-          // Initialize SDK to handle the OAuth flow
-          await sdk.initialize();
-          console.log('SDK initialized');
-          
-          // If this was an OAuth callback, complete it
-          if (isOAuthCallback) {
-            await sdk.completeOAuth();
-            console.log('OAuth completed successfully');
-          }
-          
-          // After OAuth, fetch the lender role
-          if (sdk.isAuthenticated() && mounted) {
-            console.log('SDK authenticated, fetching lender role...');
-            await fetchLenderRole(sdk);
-          }
-          
-          // Reset the flag after initialization attempt
+        // ONLY handle OAuth callback - check if we're returning from UiPath login
+        if (sdk.isInOAuthCallback() && !oauthCallbackHandledRef.current) {
+          console.log('OAuth callback detected, completing OAuth...');
+          oauthCallbackHandledRef.current = true;
+          setIsLoading(true);
+
+          await sdk.completeOAuth();
+          console.log('OAuth completed successfully');
+
+          // After OAuth is complete, check authentication and fetch role
           if (mounted) {
-            setShouldInitializeSDK(false);
-          }
-        } else if (!isOAuthCallback && !shouldInitializeSDK) {
-          // Normal page load - check if there's an existing valid token
-          console.log('Normal page load detected');
-          
-          const tokenKey = `uipath_sdk_user_token-${config.clientId}`;
-          const existingToken = sessionStorage.getItem(tokenKey);
-          
-          if (existingToken) {
-            try {
-              const decoded = jwtDecode<any>(existingToken);
-              // Check if token is not expired
-              if (decoded.exp && decoded.exp > Math.floor(Date.now() / 1000)) {
-                console.log('Valid existing token found, authenticating...');
-                if (mounted) {
-                  try {
-                    // Initialize SDK with existing token
-                    await sdk.initialize();
-                    if (sdk.isAuthenticated()) {
-                      await fetchLenderRole(sdk);
-                    } else {
-                      resetAuthState();
-                    }
-                  } catch (initErr) {
-                    console.error('Failed to initialize SDK with existing token:', initErr);
-                    resetAuthState();
-                  }
-                }
-              } else {
-                console.log('Existing token is expired');
-                if (mounted) {
-                  resetAuthState();
-                }
-              }
-            } catch (tokenErr) {
-              console.log('Existing token is invalid:', tokenErr);
-              if (mounted) {
-                resetAuthState();
-              }
-            }
-          } else {
-            console.log('No existing token found, user is not authenticated');
-            if (mounted) {
+            if (sdk.isAuthenticated()) {
+              await fetchLenderRole(sdk);
+            } else {
               resetAuthState();
+              setError('SDK authentication failed');
             }
+          }
+
+          if (mounted) {
+            setIsLoading(false);
+          }
+        } else {
+          // Not in OAuth callback - don't initialize, just finish loading
+          if (mounted) {
+            setIsLoading(false);
           }
         }
       } catch (err) {
         const errorMsg = getAuthErrorMessage(err, 'Authentication failed');
-        console.error('Authentication initialization failed:', err);
+        if (!errorMsg.includes('invalid_grant')) {
+          console.error('Authentication callback error:', err);
+        }
         if (mounted) {
           resetAuthState();
-          setError(getAuthErrorMessage(err, 'Authentication failed'));
-          setShouldInitializeSDK(false);
-        }
-      } finally {
-        if (mounted) {
+          setError(errorMsg);
           setIsLoading(false);
         }
       }
     };
 
-    initializeAuth();
+    handleAuthCallback();
 
     return () => {
       mounted = false;
     };
-  }, [config.clientId, hasLoggedOut, shouldInitializeSDK]);
+  }, [config.clientId, hasLoggedOut]);
  
   const login = async (role?: string) => {
+    const sdk = getSdk();
     setError(null);
+    setIsLoading(true);
 
     try {
       // Clear the logout flag when user tries to log in again
       setLoggedOutFlag(false);
-      sessionStorage.setItem('just_logged_in', 'true');
 
       if (role) {
         sessionStorage.setItem('intended_role', role);
       }
 
-      console.log('Login button clicked, triggering SDK initialization...');
+      // Initialize the SDK only on login button click
+      if (!sdkInitializedRef.current) {
+        console.log('Initializing SDK on login button click...');
+        await sdk.initialize();
+        sdkInitializedRef.current = true;
+      }
       
-      // Set flag to trigger useEffect to initialize SDK
-      // This will cause the useEffect to run and call sdk.initialize()
-      setShouldInitializeSDK(true);
-      
+      // After initialize, the SDK will handle the OAuth redirect
+      // When the callback returns, the useEffect will re-run and handle the callback
     } catch (err) {
-      console.error('Login preparation failed:', err);
+      console.error('Login failed:', err);
       setError(getAuthErrorMessage(err, 'Login failed'));
+      setIsLoading(false);
+      sdkInitializedRef.current = false;
     }
   };
  
@@ -339,6 +261,9 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
     setError(null);
     console.log('Setting hasLoggedOut flag to true (persisted in sessionStorage)...');
     setLoggedOutFlag(true);
+    console.log('Resetting SDK flags...');
+    sdkInitializedRef.current = false;
+    oauthCallbackHandledRef.current = false;
     console.log('Creating new SDK instance...');
     sdkRef.current = new UiPath(config);
     console.log('Redirecting to home page...');
@@ -353,16 +278,16 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
     setViewMode('lender');
   };
 
-  // Re-fetch lender record to get latest role and admin status
+  // Re-fetch lender record to get latest admin status
   const refreshAdminStatus = async () => {
-    if (!isAuthenticated) return null;
+    if (!isAuthenticated) return;
     const sdk = getSdk();
     const tokenKey = `uipath_sdk_user_token-${config.clientId}`;
     const lenderProfileEntityId = import.meta.env.VITE_LENDER_PROFILE_ENTITY_ID;
 
     try {
       const lenderToken = sessionStorage.getItem(tokenKey);
-      if (!lenderToken || !lenderProfileEntityId) return null;
+      if (!lenderToken || !lenderProfileEntityId) return;
 
       const decodedToken = jwtDecode<any>(lenderToken);
       const userEmail = decodedToken?.email || decodedToken?.name;
@@ -383,17 +308,9 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         if (!isActive) {
           console.log('[refreshAdminStatus] User is disabled, logging out');
           logout();
-          return null;
+          return;
         }
 
-        // Update role
-        const resolvedRole = mapLenderRole(lenderRecord.role || lenderRecord.Role);
-        if (resolvedRole) {
-          console.log('[refreshAdminStatus] Updated roleLender:', resolvedRole);
-          setLenderRole(resolvedRole);
-        }
-
-        // Update admin status
         const userIsAdmin = lenderRecord.IsAdmin ?? lenderRecord.isAdmin ?? false;
         setIsAdmin(userIsAdmin);
         console.log('[refreshAdminStatus] Updated isAdmin:', userIsAdmin);
@@ -402,13 +319,10 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         if (!userIsAdmin && viewMode === 'admin') {
           setViewMode('lender');
         }
-
-        return { role: resolvedRole, isAdmin: userIsAdmin };
       }
     } catch (err) {
       console.error('[refreshAdminStatus] Failed to refresh admin status:', err);
     }
-    return null;
   };
  
   return (
