@@ -3,24 +3,31 @@ import { UiPath, UiPathError } from '@uipath/uipath-typescript/core';
 import type { UiPathSDKConfig } from '@uipath/uipath-typescript/core';
 import { jwtDecode } from 'jwt-decode';
 import { Entities } from '@uipath/uipath-typescript/entities';
- 
- interface UiPathAuthContextType {
-   isAuthenticated: boolean;
-   isLoading: boolean;
-   sdk: UiPath;
-   login: (role?: string) => Promise<void>;
-   logout: () => void;
-   user: string | null;
-   error: string | null;
-   roleLender: string | null;
-   isAdmin: boolean;
-   switchToAdmin: () => void;
-   switchToLender: () => void;
-   refreshAdminStatus: () => Promise<void>;
- }
- 
+
+interface RefreshAdminStatusResult {
+  role: string | null;
+  isAdmin: boolean;
+}
+
+interface UiPathAuthContextType {
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  sdk: UiPath;
+  login: (role?: string) => Promise<void>;
+  logout: () => void;
+  user: string | null;
+  error: string | null;
+  roleLender: string | null;
+  isAdmin: boolean;
+  switchToAdmin: () => void;
+  switchToLender: () => void;
+  refreshAdminStatus: () => Promise<RefreshAdminStatusResult | undefined>;
+}
+
+
+
 const UiPathAuthContext = createContext<UiPathAuthContextType | undefined>(undefined);
- 
+
 export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: UiPathSDKConfig }> = ({ children, config }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -36,7 +43,7 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
   const sdkRef = useRef<UiPath | null>(null);
   const sdkInitializedRef = useRef(false);
   const oauthCallbackHandledRef = useRef(false);
-  
+
   const getSdk = () => {
     if (!sdkRef.current) {
       sdkRef.current = new UiPath(config);
@@ -78,8 +85,8 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
   // Fetch lender role and set authenticated state (called after SDK is initialized)
   const fetchLenderRole = async (sdk: UiPath): Promise<boolean> => {
     const tokenKey = `uipath_sdk_user_token-${config.clientId}`;
-      const lenderProfileEntityId =
-        import.meta.env.VITE_LENDER_PROFILE_ENTITY_ID;
+    const lenderProfileEntityId =
+      import.meta.env.VITE_LENDER_PROFILE_ENTITY_ID;
 
     try {
       console.log('SDK is authenticated, fetching token...');
@@ -143,12 +150,12 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
 
       console.log('Setting authenticated with role:', resolvedRole);
       setLenderRole(resolvedRole);
-      
+
       // Check if user is admin
       const userIsAdmin = lenderRecord.IsAdmin ?? lenderRecord.isAdmin ?? false;
       setIsAdmin(userIsAdmin);
       console.log('User isAdmin:', userIsAdmin);
-      
+
       setIsAuthenticated(true);
       return true;
     } catch (err) {
@@ -220,7 +227,7 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       mounted = false;
     };
   }, [config.clientId, hasLoggedOut]);
- 
+
   const login = async (role?: string) => {
     const sdk = getSdk();
     setError(null);
@@ -240,7 +247,7 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         await sdk.initialize();
         sdkInitializedRef.current = true;
       }
-      
+
       // After initialize, the SDK will handle the OAuth redirect
       // When the callback returns, the useEffect will re-run and handle the callback
     } catch (err) {
@@ -250,7 +257,7 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       sdkInitializedRef.current = false;
     }
   };
- 
+
   const logout = () => {
     console.log('=== LOGOUT INITIATED ===');
     const sdk = getSdk();
@@ -279,8 +286,9 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
   };
 
   // Re-fetch lender record to get latest admin status
-  const refreshAdminStatus = async () => {
+  const refreshAdminStatus = async (): Promise<RefreshAdminStatusResult | undefined> => {
     if (!isAuthenticated) return;
+
     const sdk = getSdk();
     const tokenKey = `uipath_sdk_user_token-${config.clientId}`;
     const lenderProfileEntityId = import.meta.env.VITE_LENDER_PROFILE_ENTITY_ID;
@@ -299,12 +307,14 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
       const lenderRecord = (lenderRes.items as any[]).find((record: any) => {
         const recordEmail = String(record.email || record.Email || '').toLowerCase().trim();
         const currentUserEmail = String(userEmail || '').toLowerCase().trim();
+
         return recordEmail !== '' && recordEmail === currentUserEmail;
       });
 
       if (lenderRecord) {
         // Check if user is disabled
         const isActive = lenderRecord.isActive ?? lenderRecord.IsActive ?? true;
+
         if (!isActive) {
           console.log('[refreshAdminStatus] User is disabled, logging out');
           logout();
@@ -312,19 +322,29 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
         }
 
         const userIsAdmin = lenderRecord.IsAdmin ?? lenderRecord.isAdmin ?? false;
+
+        const resolvedRole = mapLenderRole(
+          lenderRecord.role || lenderRecord.Role
+        );
+
         setIsAdmin(userIsAdmin);
+
         console.log('[refreshAdminStatus] Updated isAdmin:', userIsAdmin);
-        
-        // If admin was disabled, switch to lender view
+
         if (!userIsAdmin && viewMode === 'admin') {
           setViewMode('lender');
         }
+
+        return {
+          role: resolvedRole,
+          isAdmin: userIsAdmin,
+        };
       }
     } catch (err) {
       console.error('[refreshAdminStatus] Failed to refresh admin status:', err);
     }
   };
- 
+
   return (
     <UiPathAuthContext.Provider value={{
       isAuthenticated,
@@ -344,7 +364,7 @@ export const UiPathAuthProvider: React.FC<{ children: React.ReactNode; config: U
     </UiPathAuthContext.Provider>
   );
 };
- 
+
 export const useUiPathAuth = () => {
   const ctx = useContext(UiPathAuthContext);
   if (!ctx) throw new Error("useUiPathAuth must be used inside UiPathAuthProvider");
